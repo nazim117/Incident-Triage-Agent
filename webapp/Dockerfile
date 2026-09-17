@@ -1,0 +1,42 @@
+# python:3.12-slim rather than the full python:3.12 image: it's a much
+# smaller Debian base with no compilers/docs/extra tooling baked in. Smaller
+# image = faster builds/pulls and a smaller attack surface. We're NOT using
+# "alpine" here (unlike nginx/postgres below) because psycopg2 needs
+# libpq and building Python C-extensions against Alpine's musl libc is more
+# hassle than it's worth for a learning project - slim (Debian-based, glibc)
+# keeps that simple.
+FROM python:3.12-slim
+
+# Install curl so Docker's HEALTHCHECK (see docker-compose.yml) can actually
+# curl the app's own /health endpoint from inside the container. The slim
+# base image does not include curl by default.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy and install dependencies BEFORE copying the rest of the app code.
+# Docker caches each layer; as long as requirements.txt doesn't change, this
+# `pip install` layer is reused on rebuilds even if app.py changes, so
+# `docker compose up --build` after an app.py edit is fast instead of
+# reinstalling every dependency from scratch every time.
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app.py .
+
+# Run as a non-root user inside the container. If the app were ever
+# compromised (e.g. via a dependency vulnerability), the attacker lands as
+# an unprivileged user rather than root - standard container hardening.
+RUN useradd --create-home --uid 1000 appuser
+USER appuser
+
+EXPOSE 8000
+
+# gunicorn instead of `flask run` / `app.run()`: gunicorn is a real WSGI
+# server (pre-forking worker processes, proper handling of slow/concurrent
+# requests). Flask's built-in dev server is single-threaded, not designed
+# for anything beyond local debugging, and will silently become your
+# bottleneck if you ever put real load through this stack.
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "app:app"]

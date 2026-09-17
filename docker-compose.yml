@@ -1,0 +1,131 @@
+# Phase 1 of the Infra Incident Triage Agent project: the base stack that
+# every later phase (monitoring, failure injection, the agent) observes and
+# acts on. Three services - nginx, webapp, db - all on one custom network.
+#
+# Run with:
+#   cp .env.example .env      # first time only
+#   docker compose up --build
+
+services:
+  db:
+    image: postgres:16-alpine
+    # "alpine" images use musl libc and are much smaller than the default
+    # Debian-based image. Postgres itself is precompiled by the official
+    # image maintainers, so unlike the webapp (which builds psycopg2 from
+    # source) there's no compiler-compatibility reason to avoid alpine here.
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      # Named volume: Docker manages the storage location on the host.
+      # Containers are meant to be disposable (recreate freely with
+      # `docker compose up --build`), but the DATA inside them usually
+      # isn't - a named volume lives independently of the container's
+      # lifecycle, so `docker compose down` (without -v) followed by
+      # `docker compose up` keeps your data. Only `docker compose down -v`
+      # deletes it.
+      - pgdata:/var/lib/postgresql/data
+      # Runs once, only on first init (empty data dir) - see db/init.sql
+      # for details.
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      # pg_isready is Postgres's own bundled tool for exactly this purpose:
+      # "can this server accept connections right now". Using the
+      # database's own readiness tool beats a generic TCP port check, which
+      # would report "healthy" the instant the port opens even if Postgres
+      # is still doing crash recovery or replaying WAL.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - triage-net
+    # No `ports:` here on purpose - Postgres is reachable from other
+    # containers on triage-net by name ("db:5432"), but nothing on the host
+    # can connect to it directly. Least exposure: nothing outside Docker can
+    # even attempt to hit the database port.
+
+  webapp:
+    build: ./webapp
+    restart: unless-stopped
+    environment:
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+    depends_on:
+      db:
+        # Plain `depends_on: [db]` (without `condition`) only waits for the
+        # db CONTAINER to start, not for Postgres inside it to actually be
+        # ready to accept connections - those are different moments in
+        # time, often by several seconds. Without this condition, the
+        # webapp would frequently win the race and fail its first DB
+        # connection attempts right after a fresh `docker compose up`.
+        # Tying it to db's healthcheck (above) closes that race.
+        condition: service_healthy
+    healthcheck:
+      # Hits its OWN /health endpoint (liveness only, see app.py) - not
+      # /db-check. If this healthcheck depended on the database, a slow or
+      # down Postgres would make Docker think the webapp container itself
+      # is unhealthy and could trigger restart loops that don't fix
+      # anything, since the actual problem is downstream.
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - triage-net
+    # No `ports:` either - only reachable from other containers on
+    # triage-net (specifically, from nginx). All external traffic must go
+    # through the reverse proxy.
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      webapp:
+        condition: service_healthy
+    ports:
+      # This is the ONLY port published to the host in the whole stack.
+      # Host port 8080 -> container port 80. Everything else stays purely
+      # internal to the Docker network.
+      - "8080:80"
+    healthcheck:
+      # Deliberately 127.0.0.1, NOT "localhost": inside this container
+      # "localhost" resolves to ::1 (IPv6) before 0.0.0.0/127.0.0.1 (IPv4),
+      # but our `listen 80;` directive in default.conf only binds IPv4. So
+      # `wget http://localhost/...` was failing with "connection refused"
+      # (trying ::1 first) even though the server was up and fine on IPv4 -
+      # this healthcheck reported "unhealthy" while curl from the HOST
+      # worked perfectly. Caught this live while verifying Phase 1: a good
+      # first example of why "it responds to curl from outside" and "the
+      # container's own healthcheck passes" are not the same claim.
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/nginx-health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks:
+      - triage-net
+
+networks:
+  triage-net:
+    # A user-defined bridge network (as opposed to Docker's default bridge
+    # network, which all containers land on if you don't specify one).
+    # User-defined networks give you two things the default bridge doesn't:
+    #   1. Automatic DNS resolution by container/service name (this is
+    #      what lets nginx's config say "server webapp:8000" and db's
+    #      healthcheck implicitly work via service name).
+    #   2. Isolation - containers on triage-net can't be reached from other
+    #      Compose projects' networks unless explicitly connected.
+    driver: bridge
+
+volumes:
+  pgdata:
