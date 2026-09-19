@@ -32,6 +32,11 @@ COPY app.py .
 RUN useradd --create-home --uid 1000 appuser
 USER appuser
 
+# Shared directory where gunicorn workers write metric files (see app.py).
+# Wiped on every container start so stale files from a previous run don't
+# leak into the new one.
+ENV PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus
+
 EXPOSE 8000
 
 # gunicorn instead of `flask run` / `app.run()`: gunicorn is a real WSGI
@@ -39,4 +44,4 @@ EXPOSE 8000
 # requests). Flask's built-in dev server is single-threaded, not designed
 # for anything beyond local debugging, and will silently become your
 # bottleneck if you ever put real load through this stack.
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "2", "app:app"]
+CMD ["sh", "-c", "rm -rf $PROMETHEUS_MULTIPROC_DIR && mkdir -p $PROMETHEUS_MULTIPROC_DIR && exec gunicorn --bind 0.0.0.0:8000 --workers 2 app:app"]

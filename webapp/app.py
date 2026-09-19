@@ -32,7 +32,15 @@ import os
 import time
 
 import psycopg2
-from flask import Flask, jsonify
+from flask import Flask, Response, g, jsonify, request
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry,
+    Counter,
+    Histogram,
+    generate_latest,
+    multiprocess,
+)
 
 app = Flask(__name__)
 
@@ -47,6 +55,42 @@ DB_PORT = os.environ.get("DB_PORT", "5432")
 DB_NAME = os.environ.get("DB_NAME", "triage")
 DB_USER = os.environ.get("DB_USER", "triage")
 DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
+
+# Prometheus metrics. gunicorn runs 2 worker processes (see Dockerfile), and
+# each has its own in-memory counters, so a plain /metrics would return
+# whichever worker happened to answer. prometheus_client's multiprocess mode
+# (enabled by the PROMETHEUS_MULTIPROC_DIR env var, set in the Dockerfile)
+# has every worker write to shared files, and /metrics aggregates them.
+REQUEST_COUNT = Counter(
+    "webapp_http_requests_total",
+    "HTTP requests handled by the webapp",
+    ["method", "route", "status"],
+)
+REQUEST_LATENCY = Histogram(
+    "webapp_http_request_duration_seconds",
+    "HTTP request latency in seconds",
+    ["route"],
+)
+DB_CHECK_ERRORS = Counter(
+    "webapp_db_check_errors_total",
+    "Failed database connectivity checks in /db-check",
+)
+
+
+@app.before_request
+def _start_timer():
+    g.start = time.perf_counter()
+
+
+@app.after_request
+def _record_metrics(response):
+    # request.url_rule is the route pattern ("/db-check"), not the raw path,
+    # so unknown URLs can't create unbounded label values.
+    route = request.url_rule.rule if request.url_rule else "unmatched"
+    if route != "/metrics":
+        REQUEST_COUNT.labels(request.method, route, response.status_code).inc()
+        REQUEST_LATENCY.labels(route).observe(time.perf_counter() - g.start)
+    return response
 
 
 def get_db_connection():
@@ -108,11 +152,20 @@ def db_check():
             conn.close()
         return jsonify({"status": "ok", "db": "reachable"})
     except Exception as exc:  # noqa: BLE001 - we want to report ANY DB failure, not classify it
+        DB_CHECK_ERRORS.inc()
         # Returning 503 (Service Unavailable) rather than 500 signals
         # specifically "a dependency is down", which matters once
         # Prometheus/Grafana and the agent start distinguishing status
         # codes.
         return jsonify({"status": "error", "db": "unreachable", "detail": str(exc)}), 503
+
+
+@app.route("/metrics")
+def metrics():
+    """Prometheus scrape endpoint (aggregated across gunicorn workers)."""
+    registry = CollectorRegistry()
+    multiprocess.MultiProcessCollector(registry)
+    return Response(generate_latest(registry), mimetype=CONTENT_TYPE_LATEST)
 
 
 if __name__ == "__main__":
