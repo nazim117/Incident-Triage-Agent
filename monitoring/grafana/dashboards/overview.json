@@ -142,8 +142,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (name) (rate(container_cpu_usage_seconds_total{name=~\".+\"}[1m]))",
-          "legendFormat": "",
+          "expr": "sum by (name, image) (rate(container_cpu_usage_seconds_total{name=~\".+\"}[1m]))",
+          "legendFormat": "{{image}}",
           "refId": "A"
         }
       ]
@@ -170,8 +170,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (name) (container_memory_working_set_bytes{name=~\".+\"})",
-          "legendFormat": "",
+          "expr": "sum by (name, image) (container_memory_working_set_bytes{name=~\".+\"})",
+          "legendFormat": "{{image}}",
           "refId": "A"
         }
       ]

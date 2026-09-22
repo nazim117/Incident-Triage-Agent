@@ -2,9 +2,14 @@
 Demo web app for the Infra Incident Triage Agent project.
 
 This app exists to give the rest of the stack (Nginx, Prometheus/Grafana in
-Phase 2, the failure-injection script in Phase 3, and the agent in Phase 4)
+Phase 2, the failure-injection scripts in Phase 3, and the agent in Phase 4)
 something real to observe and poke at. It is deliberately simple: a couple
 of routes, one dependency (Postgres), nothing clever.
+
+Phase 3 adds a `/work` route and `/admin/fault/*` endpoints, gated behind
+FAULT_INJECTION_ENABLED, that let the scripts in injection/ turn on
+synthetic 5xx errors or latency on demand - see the fault-injection section
+near the bottom of this file.
 
 Two routes matter for infra reasons, and the distinction between them is
 worth understanding up front because it's exactly the kind of thing an
@@ -28,7 +33,9 @@ app container in a loop, which does nothing to fix the actual problem and
 adds churn on top of the outage.
 """
 
+import json
 import os
+import random
 import time
 
 import psycopg2
@@ -43,6 +50,14 @@ from prometheus_client import (
 )
 
 app = Flask(__name__)
+
+# Phase 3: fault-injection admin endpoints (/admin/fault/*, /work) are only
+# registered when this is true. Defaulted off and read the same way as the
+# DB_* vars below - the same "config via environment" idiom, but here it
+# doubles as a safety gate: a real production service should never ship
+# these endpoints at all, so when the flag is off they don't exist (404),
+# rather than existing but refusing requests.
+FAULT_INJECTION_ENABLED = os.environ.get("FAULT_INJECTION_ENABLED", "false").lower() == "true"
 
 # Connection details are injected via environment variables (set in
 # docker-compose.yml from .env), never hardcoded. This is the standard
@@ -87,7 +102,13 @@ def _record_metrics(response):
     # request.url_rule is the route pattern ("/db-check"), not the raw path,
     # so unknown URLs can't create unbounded label values.
     route = request.url_rule.rule if request.url_rule else "unmatched"
-    if route != "/metrics":
+    # /admin/* calls are fault-injection control-plane traffic (scripts
+    # toggling faults on/off), not the user traffic the alerts reason
+    # about - counting them here would dilute the 5xx ratio and latency
+    # histogram with noise unrelated to whatever incident is being
+    # simulated. /work IS recorded normally: it's the deliberate target of
+    # that simulated traffic.
+    if route != "/metrics" and not route.startswith("/admin/"):
         REQUEST_COUNT.labels(request.method, route, response.status_code).inc()
         REQUEST_LATENCY.labels(route).observe(time.perf_counter() - g.start)
     return response
@@ -166,6 +187,97 @@ def metrics():
     registry = CollectorRegistry()
     multiprocess.MultiProcessCollector(registry)
     return Response(generate_latest(registry), mimetype=CONTENT_TYPE_LATEST)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: fault injection.
+#
+# gunicorn runs 2 worker processes (see Dockerfile), and they're separate
+# OS processes - a plain module-level variable set by one worker would not
+# be visible to the other, so a toggle stored that way would flip-flop
+# depending on which worker handled which request. Rather than reach for
+# multiprocessing.Value (more moving parts than this needs), we reuse the
+# same trick the Prometheus multiprocess metrics above already rely on:
+# state shared via a file on the container's local filesystem, which every
+# worker reads fresh on each request. Written atomically (temp file +
+# os.replace) so a reader never sees a half-written file.
+# ---------------------------------------------------------------------------
+
+FAULT_STATE_DIR = os.environ.get("FAULT_STATE_DIR", "/tmp/fault-injection")
+FAULT_STATE_PATH = os.path.join(FAULT_STATE_DIR, "state.json")
+
+
+def default_fault_state():
+    return {
+        "fivexx": {"enabled": False, "probability": 0.5},
+        "latency": {"enabled": False, "ms": 1500},
+        "updated_at": None,
+    }
+
+
+def read_fault_state():
+    try:
+        with open(FAULT_STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default_fault_state()
+
+
+def write_fault_state(state):
+    os.makedirs(FAULT_STATE_DIR, exist_ok=True)
+    state["updated_at"] = time.time()
+    tmp_path = FAULT_STATE_PATH + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+    os.replace(tmp_path, FAULT_STATE_PATH)
+    return state
+
+
+if FAULT_INJECTION_ENABLED:
+
+    @app.route("/admin/fault/5xx", methods=["POST"])
+    def fault_5xx():
+        """Turn on synthetic 500s for /work, at the given probability."""
+        body = request.get_json(silent=True) or {}
+        state = read_fault_state()
+        state["fivexx"]["enabled"] = True
+        state["fivexx"]["probability"] = float(body.get("probability", 0.5))
+        return jsonify(write_fault_state(state))
+
+    @app.route("/admin/fault/latency", methods=["POST"])
+    def fault_latency():
+        """Turn on synthetic latency for /work, sleeping the given ms."""
+        body = request.get_json(silent=True) or {}
+        state = read_fault_state()
+        state["latency"]["enabled"] = True
+        state["latency"]["ms"] = int(body.get("ms", 1500))
+        return jsonify(write_fault_state(state))
+
+    @app.route("/admin/fault/clear", methods=["POST"])
+    def fault_clear():
+        """Turn every fault off, back to normal behavior."""
+        return jsonify(write_fault_state(default_fault_state()))
+
+    @app.route("/admin/fault/status")
+    def fault_status():
+        return jsonify(read_fault_state())
+
+    @app.route("/work")
+    def work():
+        """Stand-in for "real" business logic, separate from `/` on purpose.
+
+        `/` stays a plain, always-known-good control route. Fault injection
+        acts on `/work` instead, so injected incidents get their own
+        `route` label (useful for Grafana/the future agent to tell
+        "the demo traffic broke" apart from "the whole app is down"), and
+        `/` keeps working as a sanity check throughout a failure scenario.
+        """
+        state = read_fault_state()
+        if state["latency"]["enabled"]:
+            time.sleep(state["latency"]["ms"] / 1000.0)
+        if state["fivexx"]["enabled"] and random.random() < state["fivexx"]["probability"]:
+            return jsonify({"status": "error", "detail": "synthetic fault injected"}), 500
+        return jsonify({"status": "ok", "route": "/work"})
 
 
 if __name__ == "__main__":

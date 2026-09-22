@@ -43,8 +43,11 @@ groups:
         annotations:
           summary: "Postgres is using over 80% of max_connections"
 
+      # cAdvisor discovers containers via containerd (see its `command` in
+      # docker-compose.yml), so `name` is the container ID rather than the
+      # compose name - `image` is the human-readable identifier here.
       - alert: ContainerRestarting
         expr: changes(container_start_time_seconds{name=~".+"}[5m]) > 2
         labels: { severity: warning }
         annotations:
-          summary: "Container {{ $labels.name }} restarted more than twice in 5m"
+          summary: "Container {{ $labels.image }} ({{ $labels.name }}) restarted more than twice in 5m"

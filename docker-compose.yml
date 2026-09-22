@@ -57,6 +57,10 @@ services:
       DB_NAME: ${DB_NAME}
       DB_USER: ${DB_USER}
       DB_PASSWORD: ${DB_PASSWORD}
+      # Phase 3: gates the /admin/fault/* and /work routes in app.py.
+      # Defaults to false at the compose level (safe-off) if .env doesn't
+      # set it, same pattern as GRAFANA_ADMIN_PASSWORD below.
+      FAULT_INJECTION_ENABLED: ${FAULT_INJECTION_ENABLED:-false}
     depends_on:
       db:
         # Plain `depends_on: [db]` (without `condition`) only waits for the
@@ -139,7 +143,7 @@ services:
       - triage-net
 
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    image: ghcr.io/google/cadvisor:v0.53.0
     restart: unless-stopped
     # Reads container stats from the host, hence the read-only host mounts.
     volumes:
@@ -147,6 +151,18 @@ services:
       - /var/run:/var/run:ro
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
+    # Docker 29+ defaults to the containerd image store (containerd
+    # snapshotter), which cAdvisor's Docker handler can't read yet - it
+    # looks for image/<driver>/layerdb/mounts/<id>/mount-id, which that store
+    # never creates, so every container fails to register and no per-container
+    # series (`name` label) get exported at all. That silently broke the
+    # ContainerRestarting alert. Docker registers its containers with
+    # containerd under the "moby" namespace, and cAdvisor's containerd factory
+    # is tried before its Docker one, so pointing it there picks every
+    # container up via containerd directly and bypasses the layerdb lookup.
+    command:
+      - -logtostderr
+      - -containerd-namespace=moby
     networks:
       - triage-net
 

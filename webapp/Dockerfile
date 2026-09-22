@@ -44,4 +44,16 @@ EXPOSE 8000
 # requests). Flask's built-in dev server is single-threaded, not designed
 # for anything beyond local debugging, and will silently become your
 # bottleneck if you ever put real load through this stack.
-CMD ["sh", "-c", "rm -rf $PROMETHEUS_MULTIPROC_DIR && mkdir -p $PROMETHEUS_MULTIPROC_DIR && exec gunicorn --bind 0.0.0.0:8000 --workers 2 app:app"]
+#
+# --worker-class gthread --threads 8: plain sync workers handle exactly one
+# request at a time each, full stop. That matters once Phase 3's latency
+# fault injection (app.py's /work route) is in the picture: a handful of
+# slow /work requests would otherwise completely occupy both workers and
+# starve /health and /metrics behind them - Docker would then mark the
+# container unhealthy and Prometheus's scrape would fail too, turning a
+# "high latency" scenario into an unrelated "target down" one. Threads
+# release the GIL during time.sleep() (what the fault uses), so a worker
+# can keep serving /health and /metrics on another thread while one thread is
+# sleeping through a slow /work request - the same fix a real service
+# would reach for to avoid one slow endpoint taking the whole process down.
+CMD ["sh", "-c", "rm -rf $PROMETHEUS_MULTIPROC_DIR && mkdir -p $PROMETHEUS_MULTIPROC_DIR && exec gunicorn --bind 0.0.0.0:8000 --workers 2 --worker-class gthread --threads 8 app:app"]
