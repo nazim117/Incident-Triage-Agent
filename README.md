@@ -41,3 +41,20 @@ Requires `FAULT_INJECTION_ENABLED=true` in `.env` (see `.env.example`).
 | `06-container-restarting.sh` | ContainerRestarting |
 
 Each script cleans up after itself (Ctrl-C included); `restore-all.sh` forces everything back to healthy regardless of what was run.
+
+## Triage agent
+
+A host-side Python process that reads firing alerts from Prometheus, investigates with read-only tools (PromQL, `docker compose ps`/`logs`, HTTP checks through nginx), and writes a diagnosis using DeepSeek. It suggests fixes but never runs them.
+
+    python -m venv .venv    # skip if .venv already exists
+    .venv/bin/pip install -r agent/requirements.txt
+    # set DEEPSEEK_API_KEY in .env (see .env.example)
+
+    cd agent
+    ../.venv/bin/python -m triage snapshot   # what the agent can see, no LLM call
+    ../.venv/bin/python -m triage once       # triage whatever is firing now
+    ../.venv/bin/python -m triage watch      # poll, triage each new incident once
+
+Reports go to `reports/` as `.md` and `.json` (the JSON includes every tool call). Tests: `cd agent && ../.venv/bin/pytest`.
+
+Try it: run `watch` in one terminal and `./injection/run.sh run database-down -- --duration 120` in another.
