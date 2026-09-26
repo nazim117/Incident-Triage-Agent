@@ -49,14 +49,16 @@ def cmd_snapshot(prom: Prometheus) -> int:
     return 0
 
 
-def build_agent(settings, prom: Prometheus) -> TriageAgent:
+def build_agent(settings, prom: Prometheus, model: str | None = None, log=log) -> TriageAgent:
+    """Raises ValueError without an API key (rather than exiting) so the
+    eval harness can reuse it."""
     if not settings.deepseek_api_key:
-        sys.exit("DEEPSEEK_API_KEY is not set - add it to .env (see .env.example)")
+        raise ValueError("DEEPSEEK_API_KEY is not set - add it to .env (see .env.example)")
     # DeepSeek speaks the OpenAI API, so the official openai SDK works as-is:
     # only the base URL and key differ.
     client = OpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url)
     toolbox = Toolbox(prom, settings.webapp_url)
-    return TriageAgent(client, settings.deepseek_model, toolbox, settings.max_steps, log=log)
+    return TriageAgent(client, model or settings.deepseek_model, toolbox, settings.max_steps, log=log)
 
 
 def triage_and_report(agent: TriageAgent, alerts: list[dict]) -> None:
@@ -79,7 +81,10 @@ def main(argv=None) -> int:
     if args.command == "snapshot":
         return cmd_snapshot(prom)
 
-    agent = build_agent(settings, prom)
+    try:
+        agent = build_agent(settings, prom)
+    except ValueError as exc:
+        sys.exit(str(exc))
 
     if args.command == "once":
         try:

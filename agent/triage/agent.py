@@ -48,6 +48,11 @@ class Diagnosis:
     model: str = ""
     steps: int = 0
     duration_seconds: float = 0.0
+    # Summed over every model call in the investigation. Each call re-sends
+    # the whole conversation, so prompt tokens grow with every step - the
+    # main reason the eval tracks steps and tokens side by side.
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -81,7 +86,7 @@ class TriageAgent:
         self.max_steps = max_steps
         self.log = log
 
-    def _complete(self, messages: list[dict], **kwargs):
+    def _complete(self, diagnosis: Diagnosis, messages: list[dict], **kwargs):
         resp = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
@@ -91,6 +96,10 @@ class TriageAgent:
             temperature=0.1,
             **kwargs,
         )
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            diagnosis.prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
+            diagnosis.completion_tokens += getattr(usage, "completion_tokens", 0) or 0
         return resp.choices[0].message
 
     def triage(self, alerts: list[dict]) -> Diagnosis:
@@ -104,7 +113,7 @@ class TriageAgent:
         reply = None
         for step in range(1, self.max_steps + 1):
             diagnosis.steps = step
-            reply = self._complete(messages)
+            reply = self._complete(diagnosis, messages)
             if not reply.tool_calls:
                 break
             # The assistant turn that requested the tools must be in the
@@ -125,13 +134,13 @@ class TriageAgent:
             # whatever evidence it has, instead of failing with nothing.
             self.log(f"  step limit ({self.max_steps}) reached, asking for a final answer")
             messages.append({"role": "user", "content": FORCE_FINAL_MESSAGE})
-            reply = self._complete(messages, tool_choice="none")
+            reply = self._complete(diagnosis, messages, tool_choice="none")
 
         parsed = parse_json_object(reply.content)
         if parsed is None:
             messages.append({"role": "assistant", "content": reply.content or ""})
             messages.append({"role": "user", "content": JSON_RETRY_MESSAGE})
-            retry = self._complete(messages, tool_choice="none")
+            retry = self._complete(diagnosis, messages, tool_choice="none")
             parsed = parse_json_object(retry.content)
             if parsed is None:
                 diagnosis.notes = "Model did not return valid JSON. Raw reply:\n" + (retry.content or "")

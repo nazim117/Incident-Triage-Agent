@@ -105,3 +105,18 @@ def test_parse_json_object():
     assert parse_json_object("```\n{\"a\": 1}\n```") == {"a": 1}
     assert parse_json_object("[1, 2]") is None
     assert parse_json_object(None) is None
+
+
+def test_token_usage_is_summed_across_calls():
+    agent, client, _ = make_agent([tool_reply(("get_alerts", "{}")), text_reply(json.dumps(FINAL))])
+    usages = iter([NS(prompt_tokens=100, completion_tokens=10), NS(prompt_tokens=150, completion_tokens=40)])
+    original = client._create
+
+    def with_usage(**kw):
+        resp = original(**kw)
+        resp.usage = next(usages)
+        return resp
+
+    client.chat.completions.create = with_usage
+    d = agent.triage(ALERTS)
+    assert (d.prompt_tokens, d.completion_tokens) == (250, 50)

@@ -219,3 +219,6 @@ __marimo__/
 
 # Triage agent output (Phase 4)
 reports/
+
+# Eval harness runs (Phase 5)
+evals/

@@ -8,6 +8,7 @@ Infra incident triage agent project, built in phases.
 | 2 | Prometheus, exporters, alert rules, Grafana | done |
 | 3 | Failure injection scripts | done |
 | 4 | Triage agent (alerts + metrics + logs → diagnosis) | todo |
+| 5 | Eval harness (inject → triage → score) | todo |
 
 ## Run
 
@@ -58,3 +59,15 @@ A host-side Python process that reads firing alerts from Prometheus, investigate
 Reports go to `reports/` as `.md` and `.json` (the JSON includes every tool call). Tests: `cd agent && ../.venv/bin/pytest`.
 
 Try it: run `watch` in one terminal and `./injection/run.sh run database-down -- --duration 120` in another.
+
+## Evals
+
+Runs each injection scenario, waits for its alert, lets the agent triage, scores the diagnosis against the known root cause, then restores the stack.
+
+    cd agent
+    ../.venv/bin/python -m triage.eval list
+    ../.venv/bin/python -m triage.eval run                        # all 6 cases, ~15 min
+    ../.venv/bin/python -m triage.eval run --only database-down --repeat 3
+    ../.venv/bin/python -m triage.eval score ../evals/<run-id>    # re-score after editing cases.py
+
+A full run makes 6 agent investigations' worth of DeepSeek calls. Results go to `evals/<run-id>/`: `scorecard.md`, `results.json`, and one `.json` + `.log` per case. Checks are in `agent/triage/eval/cases.py`. The harness drives the stack with `docker compose`, so the current Docker context must be the daemon the stack runs on; preflight refuses to start otherwise.

@@ -37,7 +37,8 @@ def render_markdown(d: Diagnosis) -> str:
     out += [
         "",
         "## Investigation",
-        f"{len(d.tool_calls)} tool calls, {d.steps} model steps, {d.duration_seconds}s, model `{d.model}`",
+        f"{len(d.tool_calls)} tool calls, {d.steps} model steps, {d.duration_seconds}s, "
+        f"{d.prompt_tokens}+{d.completion_tokens} tokens, model `{d.model}`",
         "",
     ]
     out += [f"{i}. `{c.name}({c.arguments})`" for i, c in enumerate(d.tool_calls, 1)]
